@@ -79,7 +79,7 @@ public abstract class DeconzBaseThingHandler extends BaseThingHandler implements
         }
     }
 
-    private void unregisterListener() {
+    protected void unregisterListener() {
         WebSocketConnection conn = connection;
         if (conn != null) {
             conn.unregisterListener(resourceType, config.id);

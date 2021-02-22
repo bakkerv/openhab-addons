@@ -12,21 +12,37 @@
  */
 package org.openhab.binding.deconz.internal.handler;
 
-import static org.openhab.binding.deconz.internal.BindingConstants.*;
+import static org.openhab.binding.deconz.internal.BindingConstants.CHANNEL_ALERT;
+import static org.openhab.binding.deconz.internal.BindingConstants.CHANNEL_ALL_ON;
+import static org.openhab.binding.deconz.internal.BindingConstants.CHANNEL_ANY_ON;
+import static org.openhab.binding.deconz.internal.BindingConstants.CHANNEL_COLOR;
+import static org.openhab.binding.deconz.internal.BindingConstants.CHANNEL_COLOR_TEMPERATURE;
+import static org.openhab.binding.deconz.internal.BindingConstants.CHANNEL_SCENE;
+import static org.openhab.binding.deconz.internal.BindingConstants.HUE_FACTOR;
+import static org.openhab.binding.deconz.internal.BindingConstants.THING_TYPE_LIGHTGROUP;
+import static org.openhab.binding.deconz.internal.BindingConstants.ZCL_CT_MAX;
+import static org.openhab.binding.deconz.internal.BindingConstants.ZCL_CT_MIN;
 
+import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
 
 import org.eclipse.jdt.annotation.NonNullByDefault;
+import org.eclipse.jdt.annotation.Nullable;
 import org.openhab.binding.deconz.internal.CommandDescriptionProvider;
 import org.openhab.binding.deconz.internal.Util;
 import org.openhab.binding.deconz.internal.dto.DeconzBaseMessage;
 import org.openhab.binding.deconz.internal.dto.GroupAction;
 import org.openhab.binding.deconz.internal.dto.GroupMessage;
 import org.openhab.binding.deconz.internal.dto.GroupState;
+import org.openhab.binding.deconz.internal.dto.LightMessage;
 import org.openhab.binding.deconz.internal.types.ResourceType;
-import org.openhab.core.library.types.*;
+import org.openhab.core.library.types.DecimalType;
+import org.openhab.core.library.types.HSBType;
+import org.openhab.core.library.types.OnOffType;
+import org.openhab.core.library.types.PercentType;
+import org.openhab.core.library.types.StringType;
 import org.openhab.core.thing.ChannelUID;
 import org.openhab.core.thing.Thing;
 import org.openhab.core.thing.ThingStatus;
@@ -53,6 +69,7 @@ public class GroupThingHandler extends DeconzBaseThingHandler {
     public static final Set<ThingTypeUID> SUPPORTED_THING_TYPE_UIDS = Set.of(THING_TYPE_LIGHTGROUP);
     private final Logger logger = LoggerFactory.getLogger(GroupThingHandler.class);
     private final CommandDescriptionProvider commandDescriptionProvider;
+    private Map<String, HSBType> lightsInGroup = new HashMap<>();
 
     private Map<String, String> scenes = Map.of();
     private GroupState groupStateCache = new GroupState();
@@ -142,6 +159,18 @@ public class GroupThingHandler extends DeconzBaseThingHandler {
                     CommandDescriptionBuilder.create().withCommandOptions(groupMessage.scenes.stream()
                             .map(scene -> new CommandOption(scene.name, scene.name)).collect(Collectors.toList()))
                             .build());
+            // Received group definition
+            if (groupMessage.e.isEmpty()) {
+                lightsInGroup.clear();
+                for (String lightId : groupMessage.lights) {
+                    lightsInGroup.put(lightId, HSBType.BLACK);
+                    logger.debug("Added {} as light in group {}", lightId, this.config.id);
+                    final var conn = this.connection;
+                    if (conn != null) {
+                        conn.registerListener(ResourceType.LIGHTS, lightId, this);
+                    }
+                }
+            }
 
         }
         messageReceived(config.id, stateResponse);
@@ -160,6 +189,18 @@ public class GroupThingHandler extends DeconzBaseThingHandler {
     }
 
     @Override
+    protected void unregisterListener() {
+        super.unregisterListener();
+        final var conn = this.connection;
+        if (conn != null) {
+            for (String lightId : this.lightsInGroup.keySet()) {
+                lightsInGroup.put(lightId, HSBType.BLACK);
+                conn.unregisterListener(ResourceType.LIGHTS, lightId);
+            }
+        }
+    }
+
+    @Override
     public void messageReceived(String sensorID, DeconzBaseMessage message) {
         if (message instanceof GroupMessage) {
             GroupMessage groupMessage = (GroupMessage) message;
@@ -170,6 +211,42 @@ public class GroupThingHandler extends DeconzBaseThingHandler {
                 thing.getChannels().stream().map(c -> c.getUID().getId()).forEach(c -> valueUpdated(c, groupState));
                 groupStateCache = groupState;
             }
+        }
+        if (message instanceof LightMessage) {
+            LightMessage lightMessage = (LightMessage) message;
+            if (!this.lightsInGroup.containsKey(lightMessage.id)) {
+                logger.trace("Received update for unknown light {} in group {}", lightMessage.id, this.config.id);
+                return;
+            }
+            final var newState = lightMessage.state;
+            final var bri = newState.bri;
+            final var hue = newState.hue;
+            final var sat = newState.sat;
+            if (bri != null && "xy".equals(newState.colormode)) {
+                final double @Nullable [] xy = newState.xy;
+                if (xy != null && xy.length == 2) {
+                    final var color = HSBType.fromXY((float) xy[0], (float) xy[1]);
+                    final var newColor = new HSBType(color.getHue(), color.getSaturation(), Util.toPercentType(bri));
+                    this.lightsInGroup.put(lightMessage.id, newColor);
+                }
+            } else if (bri != null && hue != null && sat != null) {
+                final var newColor = new HSBType(new DecimalType(hue / HUE_FACTOR), Util.toPercentType(sat),
+                        Util.toPercentType(bri));
+                this.lightsInGroup.put(lightMessage.id, newColor);
+            } else if (bri != null) {
+                this.lightsInGroup.put(lightMessage.id,
+                        new HSBType(DecimalType.ZERO, PercentType.ZERO, Util.toPercentType(bri)));
+            }
+            final int avgBri = (int) lightsInGroup.values().stream().mapToInt(t -> t.getBrightness().intValue())
+                    .average().orElse(0);
+            final int avgH = (int) lightsInGroup.values().stream().mapToInt(t -> t.getHue().intValue()).average()
+                    .orElse(0);
+            final int avgS = (int) lightsInGroup.values().stream().mapToInt(t -> t.getSaturation().intValue()).average()
+                    .orElse(0);
+            final var avgHSB = new HSBType(new DecimalType(avgH), new PercentType(avgS), new PercentType(avgBri));
+
+            logger.info("Average color {}", avgHSB);
+            updateState(CHANNEL_COLOR, avgHSB);
         }
     }
 }
