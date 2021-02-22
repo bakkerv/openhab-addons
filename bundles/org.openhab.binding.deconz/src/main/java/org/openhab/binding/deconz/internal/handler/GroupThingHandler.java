@@ -16,13 +16,16 @@ import static org.openhab.binding.deconz.internal.BindingConstants.*;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.stream.Collectors;
 
 import org.eclipse.jdt.annotation.NonNullByDefault;
 import org.eclipse.jdt.annotation.Nullable;
 import org.openhab.binding.deconz.internal.CommandDescriptionProvider;
 import org.openhab.binding.deconz.internal.Util;
+import org.openhab.binding.deconz.internal.dto.BridgeFullState;
 import org.openhab.binding.deconz.internal.dto.DeconzBaseMessage;
 import org.openhab.binding.deconz.internal.dto.GroupAction;
 import org.openhab.binding.deconz.internal.dto.GroupMessage;
@@ -160,11 +163,68 @@ public class GroupThingHandler extends DeconzBaseThingHandler {
                     if (conn != null) {
                         conn.registerListener(ResourceType.LIGHTS, lightId, this);
                     }
+                    getLightStateFromCache(lightId);
                 }
             }
 
         }
         messageReceived(config.id, stateResponse);
+    }
+
+    private void getLightStateFromCache(final String lightId) {
+        final var bridgeHandler = this.getBridgeHandler();
+        if (bridgeHandler != null) {
+            CompletableFuture<Optional<BridgeFullState>> bridgeFullState = bridgeHandler.getBridgeFullState();
+            bridgeFullState.thenAccept(f -> f.map(fs -> fs.getMessage(ResourceType.LIGHTS, lightId)).ifPresent(m -> {
+                logger.debug("Processing {} to get initial state for light", m);
+                this.setLightState(m, lightId);
+            }));
+        }
+    }
+
+    private void setLightState(DeconzBaseMessage lm, final String lightId) {
+        if (lm instanceof LightMessage) {
+            final var lightMessage = (LightMessage) lm;
+            if (!this.lightsInGroup.containsKey(lightId)) {
+                logger.trace("Received update for unknown light {} in group {}", lightId, this.config.id);
+                return;
+            }
+            final var newState = lightMessage.state;
+            if (newState == null) {
+                return;
+            }
+            final var bri = newState.bri;
+            final var hue = newState.hue;
+            final var sat = newState.sat;
+            final var isOn = newState.on;
+            if (isOn != null && isOn == false) {
+                this.lightsInGroup.put(lightId, HSBType.BLACK);
+            } else if (bri != null && "xy".equals(newState.colormode)) {
+                final double @Nullable [] xy = newState.xy;
+                if (xy != null && xy.length == 2) {
+                    final var color = HSBType.fromXY((float) xy[0], (float) xy[1]);
+                    final var newColor = new HSBType(color.getHue(), color.getSaturation(), Util.toPercentType(bri));
+                    this.lightsInGroup.put(lightId, newColor);
+                }
+            } else if (bri != null && hue != null && sat != null) {
+                final var newColor = new HSBType(new DecimalType(hue / HUE_FACTOR), Util.toPercentType(sat),
+                        Util.toPercentType(bri));
+                this.lightsInGroup.put(lightId, newColor);
+            } else if (bri != null) {
+                this.lightsInGroup.put(lightId,
+                        new HSBType(DecimalType.ZERO, PercentType.ZERO, Util.toPercentType(bri)));
+            }
+            final int avgBri = (int) lightsInGroup.values().stream().mapToInt(t -> t.getBrightness().intValue())
+                    .average().orElse(0);
+            final int avgH = (int) lightsInGroup.values().stream().mapToInt(t -> t.getHue().intValue()).average()
+                    .orElse(0);
+            final int avgS = (int) lightsInGroup.values().stream().mapToInt(t -> t.getSaturation().intValue()).average()
+                    .orElse(0);
+            final var avgHSB = new HSBType(new DecimalType(avgH), new PercentType(avgS), new PercentType(avgBri));
+
+            logger.info("Average color {}", avgHSB);
+            updateState(CHANNEL_COLOR, avgHSB);
+        }
     }
 
     private void valueUpdated(String channelId, GroupState newState) {
@@ -207,45 +267,8 @@ public class GroupThingHandler extends DeconzBaseThingHandler {
         }
         if (message instanceof LightMessage) {
             LightMessage lightMessage = (LightMessage) message;
-            if (!this.lightsInGroup.containsKey(lightMessage.id)) {
-                logger.trace("Received update for unknown light {} in group {}", lightMessage.id, this.config.id);
-                return;
-            }
-            final var newState = lightMessage.state;
-            if (newState == null) {
-                return;
-            }
-            final var bri = newState.bri;
-            final var hue = newState.hue;
-            final var sat = newState.sat;
-            final var isOn = newState.on;
-            if (isOn != null && isOn == false) {
-                this.lightsInGroup.put(lightMessage.id, HSBType.BLACK);
-            } else if (bri != null && "xy".equals(newState.colormode)) {
-                final double @Nullable [] xy = newState.xy;
-                if (xy != null && xy.length == 2) {
-                    final var color = HSBType.fromXY((float) xy[0], (float) xy[1]);
-                    final var newColor = new HSBType(color.getHue(), color.getSaturation(), Util.toPercentType(bri));
-                    this.lightsInGroup.put(lightMessage.id, newColor);
-                }
-            } else if (bri != null && hue != null && sat != null) {
-                final var newColor = new HSBType(new DecimalType(hue / HUE_FACTOR), Util.toPercentType(sat),
-                        Util.toPercentType(bri));
-                this.lightsInGroup.put(lightMessage.id, newColor);
-            } else if (bri != null) {
-                this.lightsInGroup.put(lightMessage.id,
-                        new HSBType(DecimalType.ZERO, PercentType.ZERO, Util.toPercentType(bri)));
-            }
-            final int avgBri = (int) lightsInGroup.values().stream().mapToInt(t -> t.getBrightness().intValue())
-                    .average().orElse(0);
-            final int avgH = (int) lightsInGroup.values().stream().mapToInt(t -> t.getHue().intValue()).average()
-                    .orElse(0);
-            final int avgS = (int) lightsInGroup.values().stream().mapToInt(t -> t.getSaturation().intValue()).average()
-                    .orElse(0);
-            final var avgHSB = new HSBType(new DecimalType(avgH), new PercentType(avgS), new PercentType(avgBri));
-
-            logger.info("Average color {}", avgHSB);
-            updateState(CHANNEL_COLOR, avgHSB);
+            this.setLightState(lightMessage, lightMessage.id);
         }
     }
+
 }

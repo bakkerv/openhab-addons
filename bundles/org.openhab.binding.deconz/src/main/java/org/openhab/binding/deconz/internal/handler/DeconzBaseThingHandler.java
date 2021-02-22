@@ -86,7 +86,7 @@ public abstract class DeconzBaseThingHandler extends BaseThingHandler implements
         }
     }
 
-    private @Nullable DeconzBridgeHandler getBridgeHandler() {
+    protected @Nullable DeconzBridgeHandler getBridgeHandler() {
         Bridge bridge = getBridge();
         if (bridge == null) {
             updateStatus(ThingStatus.OFFLINE, ThingStatusDetail.BRIDGE_OFFLINE);
