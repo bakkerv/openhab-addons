@@ -12,16 +12,7 @@
  */
 package org.openhab.binding.deconz.internal.handler;
 
-import static org.openhab.binding.deconz.internal.BindingConstants.CHANNEL_ALERT;
-import static org.openhab.binding.deconz.internal.BindingConstants.CHANNEL_ALL_ON;
-import static org.openhab.binding.deconz.internal.BindingConstants.CHANNEL_ANY_ON;
-import static org.openhab.binding.deconz.internal.BindingConstants.CHANNEL_COLOR;
-import static org.openhab.binding.deconz.internal.BindingConstants.CHANNEL_COLOR_TEMPERATURE;
-import static org.openhab.binding.deconz.internal.BindingConstants.CHANNEL_SCENE;
-import static org.openhab.binding.deconz.internal.BindingConstants.HUE_FACTOR;
-import static org.openhab.binding.deconz.internal.BindingConstants.THING_TYPE_LIGHTGROUP;
-import static org.openhab.binding.deconz.internal.BindingConstants.ZCL_CT_MAX;
-import static org.openhab.binding.deconz.internal.BindingConstants.ZCL_CT_MIN;
+import static org.openhab.binding.deconz.internal.BindingConstants.*;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -190,11 +181,13 @@ public class GroupThingHandler extends DeconzBaseThingHandler {
 
     @Override
     protected void unregisterListener() {
+        logger.trace("Unregistering");
         super.unregisterListener();
         final var conn = this.connection;
         if (conn != null) {
             for (String lightId : this.lightsInGroup.keySet()) {
                 lightsInGroup.put(lightId, HSBType.BLACK);
+                logger.trace("Unregistering for light {}", lightId);
                 conn.unregisterListener(ResourceType.LIGHTS, lightId);
             }
         }
@@ -219,10 +212,16 @@ public class GroupThingHandler extends DeconzBaseThingHandler {
                 return;
             }
             final var newState = lightMessage.state;
+            if (newState == null) {
+                return;
+            }
             final var bri = newState.bri;
             final var hue = newState.hue;
             final var sat = newState.sat;
-            if (bri != null && "xy".equals(newState.colormode)) {
+            final var isOn = newState.on;
+            if (isOn != null && isOn == false) {
+                this.lightsInGroup.put(lightMessage.id, HSBType.BLACK);
+            } else if (bri != null && "xy".equals(newState.colormode)) {
                 final double @Nullable [] xy = newState.xy;
                 if (xy != null && xy.length == 2) {
                     final var color = HSBType.fromXY((float) xy[0], (float) xy[1]);
